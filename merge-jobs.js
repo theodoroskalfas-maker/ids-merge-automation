@@ -157,7 +157,36 @@ async function main() {
 	}
 
 	if (results.errors.length > 0) {
-		process.exitCode = 1; // mark the GitHub Actions run as failed if any errors occurred
+		process.exitCode = 1;
+	}
+
+	// Notify Zoho CRM — update the Last_Merge_Result field on the FWC record
+	const errorSample = results.errors.length > 0
+		? "\n\nFirst 10 errors:\n" + results.errors.slice(0, 10).map(e => `  - ${e.relatieId}: ${e.reason}`).join("\n")
+		: "";
+
+	const summary = [
+		`Merge completed: ${new Date().toISOString()}`,
+		`FWC: ${fwcName}`,
+		`Total locations: ${locationCount}`,
+		`Created: ${results.created}`,
+		`Updated: ${results.updated}`,
+		`Skipped: ${results.skipped}`,
+		`Jobs linked: ${results.jobsLinked}`,
+		`Errors: ${results.errors.length}`,
+		results.errors.length === 0 ? "Status: SUCCESS" : "Status: COMPLETED WITH ERRORS",
+		errorSample,
+	].join("\n");
+
+	try {
+		const notifyResult = await callZohoFunction("merge_complete_notify", {
+			fwcId: FWC_ID,
+			summary: summary,
+		});
+		const parsed = typeof notifyResult === "string" ? JSON.parse(notifyResult) : notifyResult;
+		console.log(`\nZoho notification: field update ${parsed.fieldUpdateStatus || "unknown"}`);
+	} catch (err) {
+		console.warn(`\nFailed to send Zoho notification: ${err.message}`);
 	}
 }
 
