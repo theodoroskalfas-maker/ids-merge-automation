@@ -1,0 +1,282 @@
+// ============================================================
+// Standalone Function: get_duplicate_job_ids_for_config
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Replaces Steps 1-5 of Cleanup_Duplicate_Jobs_V3. Finds
+//          duplicate Jobs scoped to the FWC(s) on a Job_Automation_Config
+//          record and returns the IDs to delete, pre-chunked into
+//          batches of 500 (mass_delete's own per-call limit). Does NOT
+//          delete anything — deletion is delete_job_batch, called in a
+//          loop from GitHub Actions.
+//
+// WHY THIS REPLACES THE OLD APPROACH:
+// Cleanup_Duplicate_Jobs_V3's Step 4 (COQL GROUP BY, ~21 calls) is cheap.
+// Its Step 5 is the problem: ONE ADDITIONAL COQL CALL PER DUPLICATE
+// COMBINATION FOUND, nested inside Step 4's loop, inside one execution.
+// That scales with the NUMBER OF DUPLICATES, not dataset size — a config
+// whose FWC scope has accumulated hundreds of duplicate combinations
+// (e.g. after repeated mass-create test runs) can hit the 5-minute
+// button timeout or 200k statement limit in a single click, even though
+// each individual COQL call is cheap on its own.
+//
+// FIX: do ONE paginated COQL pass over ALL scoped Jobs (ordered so
+// duplicates land together), pulling id + Klant + Field_Work_Cycle +
+// Campaign_Checklist per row, then group rows by
+// (Klant, Field_Work_Cycle, Campaign_Checklist) IN MEMORY — keeping the
+// lowest id per group, marking the rest for deletion. This collapses
+// the old Step 4 (GROUP BY) + Step 5 (per-combination fetch) into a
+// single paginated fetch. Call count now scales with TOTAL SCOPED JOBS
+// / 200, not with duplicate-combination count.
+//
+// KEEP STRATEGY: unchanged from V3 — always keeps the OLDEST record
+// (lowest id = created first).
+//
+// Steps 1-3 (read FWC names from config, resolve to IDs, build WHERE
+// clause) are unchanged from Cleanup_Duplicate_Jobs_V3 — copied as-is.
+//
+// Parameter: configRecordId (String)
+//
+// Returns (JSON string):
+// {
+//   "fwcNames": ["Y26R01A", ...],
+//   "duplicateCombinations": <int>,
+//   "totalDuplicateIds": <int>,
+//   "deleteBatchCount": <int>,
+//   "deleteBatches": [ ["id1","id2",...], ["id501",...], ... ],
+//   "pageLimitHit": true|false,
+//   "error": "..." (only present on failure)
+// }
+// ============================================================
+string standalone.get_duplicate_job_ids_for_config(String configRecordId)
+{
+	result = Map();
+
+	// ----------------------------------------
+	// STEP 1: Read FWC names from config record (unchanged from V3)
+	// ----------------------------------------
+	configRecord = zoho.crm.getRecordById("Job_Automation_Config",configRecordId.toLong());
+	if(configRecord == null)
+	{
+		result.put("error","Config record not found for ID: " + configRecordId);
+		return result.toString();
+	}
+
+	fwcRaw = configRecord.get("FWC");
+	if(fwcRaw == null || fwcRaw.toString() == "")
+	{
+		result.put("error","No FWC value found on this config record. Please fill in the 0 - FWC field.");
+		return result.toString();
+	}
+
+	fwcNames = fwcRaw.toString().toList(";");
+
+	// ----------------------------------------
+	// STEP 2: Resolve FWC names to IDs via searchRecords (unchanged from V3)
+	// Only 1-3 calls — safe outside any loop
+	// ----------------------------------------
+	fwcIdList = List();
+	for each fwcName in fwcNames
+	{
+		fwcNameTrimmed = fwcName.trim();
+		if(fwcNameTrimmed == "")
+		{
+			continue;
+		}
+		fwcSearch = zoho.crm.searchRecords("Bezoekrondes","Name:equals:" + fwcNameTrimmed);
+		if(fwcSearch != null && fwcSearch.size() > 0)
+		{
+			fwcId = fwcSearch.get(0).get("id").toString();
+			fwcIdList.add(fwcId);
+		}
+	}
+
+	if(fwcIdList.size() == 0)
+	{
+		result.put("error","Could not resolve any FWC names to IDs. Check the FWC field values match Bezoekrondes record names exactly.");
+		return result.toString();
+	}
+
+	// ----------------------------------------
+	// STEP 3: Build WHERE clause for COQL (unchanged from V3)
+	// ----------------------------------------
+	if(fwcIdList.size() == 1)
+	{
+		fwcWhereClause = "Field_Work_Cycle = '" + fwcIdList.get(0) + "'";
+	}
+	else
+	{
+		quotedIds = List();
+		for each fwcId in fwcIdList
+		{
+			quotedIds.add("'" + fwcId + "'");
+		}
+		fwcWhereClause = "Field_Work_Cycle in (" + quotedIds.toString(",") + ")";
+	}
+
+	// ----------------------------------------
+	// STEP 4 (REPLACES OLD STEPS 4+5): single paginated COQL pass over
+	// ALL scoped Jobs, ordered so duplicates land together. Groups in
+	// memory instead of issuing a follow-up COQL call per combination.
+	// ----------------------------------------
+	groupMap = Map();      // key: "Klant|FWC|Campaign" -> List of id strings
+	groupOrder = List();   // preserves first-seen order of each key, for stable iteration
+	pageLimitHit = false;
+
+	offsetList = {0,200,400,600,800,1000,1200,1400,1600,1800,2000,2200,2400,2600,2800,3000,3200,3400,3600,3800,4000,4200,4400,4600,4800,5000,5200,5400,5600,5800,6000,6200,6400,6600,6800,7000,7200,7400,7600,7800,8000,8200,8400,8600,8800,9000,9200,9400,9600,9800};
+
+	for each offsetVal in offsetList
+	{
+		idCoqlQuery = "SELECT id, Klant, Field_Work_Cycle, Campaign_Checklist FROM Locatiebezoeken WHERE " + fwcWhereClause + " AND id is not null ORDER BY Klant, Field_Work_Cycle, Campaign_Checklist, id ASC LIMIT " + offsetVal + ", 200";
+
+		queryMap = Map();
+		queryMap.put("select_query",idCoqlQuery);
+
+		coqlResponse = invokeurl
+		[
+			url :"https://www.zohoapis.eu/crm/v8/coql"
+			type :POST
+			parameters:queryMap.toString()
+			connection:"zoho_crm_conn"
+		];
+
+		coqlData = coqlResponse.get("data");
+		if(coqlData == null || coqlData.size() == 0)
+		{
+			break;
+		}
+
+		for each row in coqlData
+		{
+			rowId = row.get("id").toString();
+
+			relatieObj = row.get("Klant");
+			fwcObj = row.get("Field_Work_Cycle");
+			campaignName = row.get("Campaign_Checklist");
+
+			relatieId = "";
+			if(relatieObj != null)
+			{
+				relatieIdVal = relatieObj.get("id");
+				if(relatieIdVal != null)
+				{
+					relatieId = relatieIdVal.toString();
+				}
+			}
+
+			fwcIdFromRow = "";
+			if(fwcObj != null)
+			{
+				fwcIdVal = fwcObj.get("id");
+				if(fwcIdVal != null)
+				{
+					fwcIdFromRow = fwcIdVal.toString();
+				}
+			}
+
+			if(relatieId == "" || fwcIdFromRow == "")
+			{
+				continue;
+			}
+
+			campaignKeyPart = "";
+			if(campaignName != null)
+			{
+				campaignKeyPart = campaignName.toString();
+			}
+
+			groupKey = relatieId + "|" + fwcIdFromRow + "|" + campaignKeyPart;
+
+			if(!groupMap.containKey(groupKey))
+			{
+				groupMap.put(groupKey,List());
+				groupOrder.add(groupKey);
+			}
+			idsInGroup = groupMap.get(groupKey);
+			idsInGroup.add(rowId);
+			groupMap.put(groupKey,idsInGroup);
+		}
+
+		if(coqlData.size() < 200)
+		{
+			break;
+		}
+
+		if(offsetVal == 9800)
+		{
+			pageLimitHit = true;
+		}
+	}
+
+	// ----------------------------------------
+	// Pick which IDs to delete: keep the lowest id per group, delete the rest.
+	// Sort numerically (not lexicographically) — Zoho record IDs are large
+	// sequential numbers and are not guaranteed to stay the same digit-length
+	// forever, so a plain string sort could mis-order IDs once a length
+	// boundary is crossed. Convert to long for the comparison, keep as
+	// string IDs in the final list. No .sort() call — built with a manual
+	// min-scan using only operators already used elsewhere in this codebase.
+	// ----------------------------------------
+	allDuplicateIds = List();
+	duplicateCombinations = 0;
+
+	for each groupKey in groupOrder
+	{
+		idsInGroup = groupMap.get(groupKey);
+		if(idsInGroup.size() <= 1)
+		{
+			continue;
+		}
+
+		duplicateCombinations = duplicateCombinations + 1;
+
+		// Find the lowest id (oldest record) via manual min-scan
+		lowestId = idsInGroup.get(0);
+		lowestIdLong = lowestId.toLong();
+		for each idStr in idsInGroup
+		{
+			idLong = idStr.toLong();
+			if(idLong < lowestIdLong)
+			{
+				lowestIdLong = idLong;
+				lowestId = idStr;
+			}
+		}
+
+		// Every id except the lowest gets marked for deletion
+		for each idStr in idsInGroup
+		{
+			if(idStr == lowestId)
+			{
+				continue;
+			}
+			allDuplicateIds.add(idStr);
+		}
+	}
+
+	// ----------------------------------------
+	// Pre-chunk into batches of 500 (mass_delete's own per-call limit)
+	// ----------------------------------------
+	deleteBatches = List();
+	currentBatch = List();
+	for each dupId in allDuplicateIds
+	{
+		currentBatch.add(dupId);
+		if(currentBatch.size() >= 500)
+		{
+			deleteBatches.add(currentBatch);
+			currentBatch = List();
+		}
+	}
+	if(currentBatch.size() > 0)
+	{
+		deleteBatches.add(currentBatch);
+	}
+
+	result.put("fwcNames",fwcNames);
+	result.put("duplicateCombinations",duplicateCombinations);
+	result.put("totalDuplicateIds",allDuplicateIds.size());
+	result.put("deleteBatchCount",deleteBatches.size());
+	result.put("deleteBatches",deleteBatches);
+	result.put("pageLimitHit",pageLimitHit);
+
+	return result.toString();
+}

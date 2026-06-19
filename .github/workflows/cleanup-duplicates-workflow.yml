@@ -1,0 +1,32 @@
+name: Cleanup Duplicate Jobs
+
+# Triggered either manually from the GitHub UI ("Run workflow" button)
+# or programmatically via the GitHub REST API workflow_dispatch
+# endpoint, which is what the Zoho CRM button calls.
+on:
+  workflow_dispatch:
+    inputs:
+      configRecordId:
+        description: "Job_Automation_Config record ID to clean up (scoped to its FWC field)"
+        required: true
+        type: string
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # generous ceiling; even a large duplicate set should finish well under this
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run cleanup script
+        env:
+          ZOHO_API_KEY: ${{ secrets.ZOHO_API_KEY }}
+          CONFIG_RECORD_ID: ${{ github.event.inputs.configRecordId }}
+        run: node cleanup-duplicates.js

@@ -1,0 +1,108 @@
+// ============================================================
+// Standalone Function: delete_job_batch
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Deletes ONE batch of up to 500 Locatiebezoeken (Job) IDs via
+//          the Mass Delete API — exactly Step 6 of Cleanup_Duplicate_Jobs_V3,
+//          isolated to a single batch per call. GitHub Actions calls this
+//          once per batch returned by get_duplicate_job_ids_for_config.
+//
+// Each call is one mass_delete request for <=500 IDs — well inside
+// Zoho's own per-call limit, nowhere near the 200k statement limit or
+// 5-minute timeout. Those limits only bite when looping over many
+// batches inside ONE execution, which moving the loop to GitHub Actions
+// avoids entirely.
+//
+// Parameter: jobIdsJson (String) — JSON array of up to 500 Job ID strings
+//
+// Returns (JSON string):
+// {
+//   "status": "success" | "partial" | "error",
+//   "requested": <int>,
+//   "deleted": <int>,
+//   "errors": <int>,
+//   "errorDetails": ["..."]
+// }
+// ============================================================
+string standalone.delete_job_batch(String jobIdsJson)
+{
+	jobIdsList = jobIdsJson.toList();
+
+	result = Map();
+
+	if(jobIdsList == null || jobIdsList.size() == 0)
+	{
+		result.put("status","error");
+		result.put("requested",0);
+		result.put("deleted",0);
+		result.put("errors",0);
+		errorDetailsEmpty = List();
+		errorDetailsEmpty.add("No Job IDs provided in batch");
+		result.put("errorDetails",errorDetailsEmpty);
+		return result.toString();
+	}
+
+	deleteBody = Map();
+	deleteBody.put("ids",jobIdsList);
+
+	deleteResponse = invokeurl
+	[
+		url :"https://www.zohoapis.eu/crm/v8/Locatiebezoeken/actions/mass_delete"
+		type :POST
+		parameters:deleteBody.toString()
+		connection:"zoho_crm_conn"
+	];
+
+	deletedCount = 0;
+	errorCount = 0;
+	errorDetails = List();
+
+	// mass_delete's response shape: a top-level "data" list with one
+	// entry per requested ID, each carrying a "code" of "SUCCESS" on
+	// success (same envelope shape as the other v8 module-action
+	// endpoints documented in Section 5 of the context reference).
+	responseData = deleteResponse.get("data");
+	if(responseData != null)
+	{
+		for each entry in responseData
+		{
+			entryCode = entry.get("code");
+			if(entryCode == "SUCCESS")
+			{
+				deletedCount = deletedCount + 1;
+			}
+			else
+			{
+				errorCount = errorCount + 1;
+				errorDetails.add(entry.toString());
+			}
+		}
+	}
+	else
+	{
+		// Defensive fallback — surface the raw response so a shape
+		// mismatch is visible in GitHub Actions logs rather than
+		// silently swallowed.
+		errorDetails.add("Unexpected mass_delete response shape: " + deleteResponse.toString());
+		errorCount = jobIdsList.size();
+	}
+
+	if(errorCount == 0)
+	{
+		result.put("status","success");
+	}
+	else if(deletedCount > 0)
+	{
+		result.put("status","partial");
+	}
+	else
+	{
+		result.put("status","error");
+	}
+
+	result.put("requested",jobIdsList.size());
+	result.put("deleted",deletedCount);
+	result.put("errors",errorCount);
+	result.put("errorDetails",errorDetails);
+
+	return result.toString();
+}
