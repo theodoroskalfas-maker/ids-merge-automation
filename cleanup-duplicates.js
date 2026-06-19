@@ -9,12 +9,18 @@
  * repeated mass-create test runs) can hit Zoho's 5-minute button
  * timeout or 200k statement limit in a single click.
  *
- * This script moves that loop outside Zoho entirely, to GitHub Actions,
+ * This script moves ALL of that outside Zoho, to GitHub Actions,
  * same pattern as create-and-link-jobs.js. It calls two CRM REST
  * endpoints:
- *   - get_duplicate_job_ids_for_config  (single paginated COQL pass,
- *     groups duplicates in memory, returns delete-ID batches of 500)
- *   - delete_job_batch                  (mass_delete for one batch)
+ *   - get_scoped_jobs_page    (one COQL page of raw rows per call —
+ *     JS loops with increasing offsets and groups duplicates in memory)
+ *   - delete_job_batch        (mass_delete for one batch of <=500 IDs)
+ *
+ * The old get_duplicate_job_ids_for_config did the full paginated scan
+ * + grouping inside one Deluge execution — which itself hit the 200k
+ * statement limit on large datasets. This version keeps each Zoho call
+ * to a single COQL page (cheap), with no risk of hitting Deluge limits
+ * regardless of dataset size.
  *
  * Required environment variables (set as GitHub Actions secrets/inputs):
  *   ZOHO_API_KEY     - the zapikey for both standalone functions
@@ -37,7 +43,10 @@ const BASE_URL = "https://sandbox.zohoapis.eu/crm/v7/functions";
 
 const RETRY_LIMIT = 3;
 const RETRY_DELAY_MS = 2000;
-const DELAY_BETWEEN_CALLS_MS = 300; // gentle pacing between batch calls to avoid API rate limits
+const DELAY_BETWEEN_CALLS_MS = 300;
+
+const PAGE_SIZE = 200;   // COQL page size (Zoho max per query)
+const BATCH_SIZE = 500;  // mass_delete's per-call limit
 
 function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,12 +66,10 @@ async function callZohoFunction(functionApiName, params) {
 			const response = await fetch(url.toString(), { method: "POST" });
 			const data = await response.json();
 
-			// Real Zoho function-execute response shape (confirmed from
-			// Zoho's own docs): top-level "code", with "details.output"
-			// holding the function's return string. NOT nested under
-			// "response" — see create-and-link-jobs.js for the same fix.
-			if (data?.code === "success") {
-				return data.details.output;
+			// Zoho function-execute can return wrapped or unwrapped shape
+			const inner = data?.response ?? data;
+			if (inner?.code === "success") {
+				return inner.details.output;
 			}
 
 			lastError = new Error(
@@ -83,60 +90,118 @@ async function callZohoFunction(functionApiName, params) {
 	throw lastError;
 }
 
-async function main() {
-	if (!ZOHO_API_KEY || !CONFIG_RECORD_ID) {
-		console.error("Missing required environment variables ZOHO_API_KEY and/or CONFIG_RECORD_ID.");
-		process.exit(1);
+/**
+ * Stage 1: Paginated scan — call get_scoped_jobs_page in a loop,
+ * collect all raw rows into memory. Each Zoho call does one COQL page
+ * (<=200 rows, a handful of Deluge statements), so no risk of hitting
+ * the 200k statement limit regardless of total dataset size.
+ */
+async function scanAllScopedJobs() {
+	const allRows = [];
+	let fwcNames = null;
+	let offset = 0;
+
+	while (true) {
+		const raw = await callZohoFunction("get_scoped_jobs_page", {
+			configRecordId: CONFIG_RECORD_ID,
+			offset: String(offset),
+		});
+		const page = JSON.parse(raw);
+
+		if (page.error) {
+			throw new Error(`get_scoped_jobs_page error: ${page.error}`);
+		}
+
+		if (!fwcNames) {
+			fwcNames = page.fwcNames;
+		}
+
+		for (const row of page.rows) {
+			if (row.relatieId && row.fwcId) {
+				allRows.push(row);
+			}
+		}
+
+		console.log(`  Scanned offset ${offset}: ${page.rowCount} rows (${allRows.length} total)`);
+
+		if (!page.hasMore) {
+			break;
+		}
+
+		offset += PAGE_SIZE;
+		await sleep(DELAY_BETWEEN_CALLS_MS);
 	}
 
-	console.log(`Starting duplicate cleanup for config ${CONFIG_RECORD_ID}...`);
+	return { fwcNames, allRows };
+}
 
-	// Single call replaces the old GROUP BY pass + the old
-	// per-combination COQL loop — duplicate grouping now happens in
-	// memory inside one paginated COQL fetch.
-	const setupRaw = await callZohoFunction("get_duplicate_job_ids_for_config", {
-		configRecordId: CONFIG_RECORD_ID,
-	});
-	const setupOutput = JSON.parse(setupRaw);
+/**
+ * Stage 2: Group rows by (relatieId, fwcId, campaign) in JS memory.
+ * Keep the lowest ID (oldest record) per group, mark the rest for
+ * deletion. Same logic as get_duplicate_job_ids_for_config.dg but
+ * running in Node where there are no statement limits.
+ */
+function findDuplicateIds(allRows) {
+	const groups = new Map();
 
-	if (setupOutput.error) {
-		console.error(`Setup error: ${setupOutput.error}`);
-		process.exit(1);
+	for (const row of allRows) {
+		const key = `${row.relatieId}|${row.fwcId}|${row.campaign}`;
+		if (!groups.has(key)) {
+			groups.set(key, []);
+		}
+		groups.get(key).push(row.id);
 	}
 
-	const {
-		fwcNames,
-		duplicateCombinations,
-		totalDuplicateIds,
-		deleteBatchCount,
-		deleteBatches,
-		pageLimitHit,
-	} = setupOutput;
+	const duplicateIds = [];
+	let duplicateCombinations = 0;
 
-	console.log(`FWC(s) scoped: ${fwcNames.join(", ")}`);
-	console.log(`Duplicate combinations found: ${duplicateCombinations}`);
-	console.log(`Total Job IDs to delete: ${totalDuplicateIds} (in ${deleteBatchCount} batches)`);
+	for (const [, ids] of groups) {
+		if (ids.length <= 1) continue;
 
-	if (pageLimitHit) {
-		console.warn(
-			"WARNING: the page-scan ceiling was reached while scanning scoped Jobs. " +
-			"Not all Jobs may have been seen in this pass — re-run this cleanup after it " +
-			"completes to catch any remaining duplicates."
-		);
+		duplicateCombinations++;
+
+		// Keep the lowest ID (oldest record) — numeric comparison
+		let keepId = ids[0];
+		let keepNum = BigInt(keepId);
+		for (const id of ids) {
+			const num = BigInt(id);
+			if (num < keepNum) {
+				keepNum = num;
+				keepId = id;
+			}
+		}
+
+		for (const id of ids) {
+			if (id !== keepId) {
+				duplicateIds.push(id);
+			}
+		}
 	}
 
-	if (totalDuplicateIds === 0) {
+	return { duplicateIds, duplicateCombinations };
+}
+
+/**
+ * Stage 3: Chunk duplicate IDs into batches of 500 and call
+ * delete_job_batch once per batch.
+ */
+async function deleteBatches(duplicateIds, fwcNames, duplicateCombinations) {
+	const batches = [];
+	for (let i = 0; i < duplicateIds.length; i += BATCH_SIZE) {
+		batches.push(duplicateIds.slice(i, i + BATCH_SIZE));
+	}
+
+	console.log(`\nTotal Job IDs to delete: ${duplicateIds.length} (in ${batches.length} batches)`);
+
+	if (duplicateIds.length === 0) {
 		console.log("No duplicates found. Nothing to delete.");
 		return;
 	}
 
-	const results = {
-		deleted: 0,
-		errors: [],
-	};
+	const results = { deleted: 0, errors: [] };
 
-	for (let i = 0; i < deleteBatches.length; i++) {
-		const batch = deleteBatches[i];
+	for (let i = 0; i < batches.length; i++) {
+		const batch = batches[i];
 
 		try {
 			const resultRaw = await callZohoFunction("delete_job_batch", {
@@ -160,7 +225,7 @@ async function main() {
 		}
 
 		console.log(
-			`Progress: batch ${i + 1}/${deleteBatches.length} | deleted=${results.deleted} errors=${results.errors.length}`
+			`Progress: batch ${i + 1}/${batches.length} | deleted=${results.deleted} errors=${results.errors.length}`
 		);
 
 		await sleep(DELAY_BETWEEN_CALLS_MS);
@@ -169,7 +234,7 @@ async function main() {
 	console.log("\n========== DUPLICATE CLEANUP COMPLETE ==========");
 	console.log(`FWC(s) scoped: ${fwcNames.join(", ")}`);
 	console.log(`Duplicate combinations found: ${duplicateCombinations}`);
-	console.log(`Jobs deleted: ${results.deleted} / ${totalDuplicateIds}`);
+	console.log(`Jobs deleted: ${results.deleted} / ${duplicateIds.length}`);
 	console.log(`Errors: ${results.errors.length}`);
 
 	if (results.errors.length > 0) {
@@ -177,8 +242,33 @@ async function main() {
 		for (const e of results.errors) {
 			console.log(`  - Batch ${e.batchIndex}: ${e.reason}`);
 		}
-		process.exitCode = 1; // mark the GitHub Actions run as failed if any errors occurred
+		process.exitCode = 1;
 	}
+}
+
+async function main() {
+	if (!ZOHO_API_KEY || !CONFIG_RECORD_ID) {
+		console.error("Missing required environment variables ZOHO_API_KEY and/or CONFIG_RECORD_ID.");
+		process.exit(1);
+	}
+
+	console.log(`Starting duplicate cleanup for config ${CONFIG_RECORD_ID}...\n`);
+
+	// Stage 1: paginated scan (one Zoho call per 200 rows)
+	console.log("=== Stage 1: Scanning scoped Jobs (paginated) ===");
+	const { fwcNames, allRows } = await scanAllScopedJobs();
+	console.log(`\nFWC(s) scoped: ${fwcNames.join(", ")}`);
+	console.log(`Total scoped Jobs fetched: ${allRows.length}`);
+
+	// Stage 2: group + find duplicates (pure JS, no Zoho calls)
+	console.log("\n=== Stage 2: Grouping and finding duplicates ===");
+	const { duplicateIds, duplicateCombinations } = findDuplicateIds(allRows);
+	console.log(`Duplicate combinations found: ${duplicateCombinations}`);
+	console.log(`Duplicate Job IDs to delete: ${duplicateIds.length}`);
+
+	// Stage 3: delete in batches (one Zoho call per 500 IDs)
+	console.log("\n=== Stage 3: Deleting duplicate batches ===");
+	await deleteBatches(duplicateIds, fwcNames, duplicateCombinations);
 }
 
 main().catch((err) => {

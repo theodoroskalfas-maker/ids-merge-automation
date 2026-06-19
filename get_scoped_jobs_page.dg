@@ -1,0 +1,161 @@
+// ============================================================
+// Standalone Function: get_scoped_jobs_page
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Returns ONE page (up to 200 rows) of Jobs scoped to a
+//          Job_Automation_Config record's FWC field. GitHub Actions
+//          calls this in a loop with increasing offsets, aggregates
+//          all rows, and does the duplicate grouping in JS — keeping
+//          the Deluge execution well under the 200k statement limit
+//          regardless of dataset size.
+//
+// Parameters:
+//   configRecordId (String) — the Job_Automation_Config record ID
+//   offset         (String) — COQL OFFSET value ("0", "200", "400", …)
+//
+// Returns (JSON string):
+// {
+//   "fwcNames": ["Y26R01A", ...],
+//   "rows": [
+//     {"id":"...","relatieId":"...","fwcId":"...","campaign":"..."},
+//     ...
+//   ],
+//   "rowCount": <int>,
+//   "hasMore": true|false,
+//   "error": "..." (only present on failure)
+// }
+// ============================================================
+string standalone.get_scoped_jobs_page(String configRecordId, String offset)
+{
+	result = Map();
+
+	// ----------------------------------------
+	// Read FWC names from config record
+	// ----------------------------------------
+	configRecord = zoho.crm.getRecordById("Job_Automation_Config",configRecordId.toLong());
+	if(configRecord == null)
+	{
+		result.put("error","Config record not found for ID: " + configRecordId);
+		return result.toString();
+	}
+
+	fwcRaw = configRecord.get("FWC");
+	if(fwcRaw == null || fwcRaw.toString() == "")
+	{
+		result.put("error","No FWC value found on this config record. Please fill in the 0 - FWC field.");
+		return result.toString();
+	}
+
+	fwcNames = fwcRaw.toString().toList(";");
+
+	// ----------------------------------------
+	// Resolve FWC names to IDs via searchRecords (1-3 calls, cheap)
+	// ----------------------------------------
+	fwcIdList = List();
+	for each fwcName in fwcNames
+	{
+		fwcNameTrimmed = fwcName.trim();
+		if(fwcNameTrimmed == "")
+		{
+			continue;
+		}
+		fwcSearch = zoho.crm.searchRecords("Bezoekrondes","Name:equals:" + fwcNameTrimmed);
+		if(fwcSearch != null && fwcSearch.size() > 0)
+		{
+			fwcId = fwcSearch.get(0).get("id").toString();
+			fwcIdList.add(fwcId);
+		}
+	}
+
+	if(fwcIdList.size() == 0)
+	{
+		result.put("error","Could not resolve any FWC names to IDs. Check the FWC field values match Bezoekrondes record names exactly.");
+		return result.toString();
+	}
+
+	// ----------------------------------------
+	// Build WHERE clause for COQL
+	// ----------------------------------------
+	if(fwcIdList.size() == 1)
+	{
+		fwcWhereClause = "Field_Work_Cycle = '" + fwcIdList.get(0) + "'";
+	}
+	else
+	{
+		quotedIds = List();
+		for each fwcId in fwcIdList
+		{
+			quotedIds.add("'" + fwcId + "'");
+		}
+		fwcWhereClause = "Field_Work_Cycle in (" + quotedIds.toString(",") + ")";
+	}
+
+	// ----------------------------------------
+	// Single COQL page at the given offset
+	// ----------------------------------------
+	offsetInt = offset.toLong();
+
+	coqlQuery = "SELECT id, Klant, Field_Work_Cycle, Campaign_Checklist FROM Locatiebezoeken WHERE " + fwcWhereClause + " AND id is not null ORDER BY Klant, Field_Work_Cycle, Campaign_Checklist, id ASC LIMIT " + offsetInt + ", 200";
+
+	queryMap = Map();
+	queryMap.put("select_query",coqlQuery);
+
+	coqlResponse = invokeurl
+	[
+		url :"https://www.zohoapis.eu/crm/v8/coql"
+		type :POST
+		parameters:queryMap.toString()
+		connection:"zoho_crm_conn"
+	];
+
+	rows = List();
+	coqlData = coqlResponse.get("data");
+	if(coqlData != null)
+	{
+		for each row in coqlData
+		{
+			rowObj = Map();
+			rowObj.put("id",row.get("id").toString());
+
+			relatieObj = row.get("Klant");
+			relatieId = "";
+			if(relatieObj != null)
+			{
+				relatieIdVal = relatieObj.get("id");
+				if(relatieIdVal != null)
+				{
+					relatieId = relatieIdVal.toString();
+				}
+			}
+			rowObj.put("relatieId",relatieId);
+
+			fwcObj = row.get("Field_Work_Cycle");
+			fwcIdFromRow = "";
+			if(fwcObj != null)
+			{
+				fwcIdVal = fwcObj.get("id");
+				if(fwcIdVal != null)
+				{
+					fwcIdFromRow = fwcIdVal.toString();
+				}
+			}
+			rowObj.put("fwcId",fwcIdFromRow);
+
+			campaignName = row.get("Campaign_Checklist");
+			campaignStr = "";
+			if(campaignName != null)
+			{
+				campaignStr = campaignName.toString();
+			}
+			rowObj.put("campaign",campaignStr);
+
+			rows.add(rowObj);
+		}
+	}
+
+	result.put("fwcNames",fwcNames);
+	result.put("rows",rows);
+	result.put("rowCount",rows.size());
+	result.put("hasMore",rows.size() >= 200);
+
+	return result.toString();
+}
