@@ -46,7 +46,7 @@ const RETRY_DELAY_MS = 2000;
 const DELAY_BETWEEN_CALLS_MS = 300;
 
 const PAGE_SIZE = 200;   // COQL page size (Zoho max per query)
-const BATCH_SIZE = 500;  // mass_delete's per-call limit
+const BATCH_SIZE = 50;   // kept small so jobIdsJson fits in URL query params
 
 function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,20 +56,14 @@ async function callZohoFunction(functionApiName, params) {
 	const url = new URL(`${BASE_URL}/${functionApiName}/actions/execute`);
 	url.searchParams.set("auth_type", "apikey");
 	url.searchParams.set("zapikey", ZOHO_API_KEY);
-
-	// Pass function arguments in the POST body instead of URL query
-	// params — jobIdsJson with 500 IDs exceeds URL length limits and
-	// makes Zoho return an HTML error page instead of JSON.
-	const body = JSON.stringify({ arguments: params });
+	for (const [key, value] of Object.entries(params)) {
+		url.searchParams.set(key, value);
+	}
 
 	let lastError = null;
 	for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
 		try {
-			const response = await fetch(url.toString(), {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body,
-			});
+			const response = await fetch(url.toString(), { method: "POST" });
 			const data = await response.json();
 
 			// Zoho function-execute can return wrapped or unwrapped shape
