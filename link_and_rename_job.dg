@@ -97,7 +97,7 @@ string standalone.link_and_rename_job(String jobId, String campaignIdsJson, Stri
 		if(responseData != null && responseData.size() > 0)
 		{
 			firstResult = responseData.get(0);
-			if(firstResult.get("code") == "SUCCESS")
+			if(firstResult.get("code") == "SUCCESS" || firstResult.get("code") == "DUPLICATE_LINKING_DATA")
 			{
 				linked = true;
 			}
