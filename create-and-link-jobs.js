@@ -289,6 +289,7 @@ async function main() {
 			const notifyResult = await callZohoFunction("create_jobs_notify", {
 				configRecordId: CONFIG_RECORD_ID,
 				summary: summary,
+				totalJobsCreated: String(jobLinkQueue.length),
 			});
 			const parsed = typeof notifyResult === "string" ? JSON.parse(notifyResult) : notifyResult;
 			console.log(`\nZoho notification: field update ${parsed.fieldUpdateStatus || "unknown"}`);

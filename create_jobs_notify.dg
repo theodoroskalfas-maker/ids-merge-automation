@@ -8,15 +8,18 @@
 //
 // Parameter: configRecordId (String) — Job_Automation_Config record ID
 //            summary (String) — multiline run summary
+//            totalJobsCreated (String) — number of Jobs created this run
 //
 // Returns (JSON string): { "fieldUpdateStatus": "success"|"failed" }
 // ============================================================
-string standalone.create_jobs_notify(String configRecordId, String summary)
+string standalone.create_jobs_notify(String configRecordId, String summary, String totalJobsCreated)
 {
 	result = Map();
 
 	updateMap = Map();
 	updateMap.put("Last_Created_Records",summary);
+	updateMap.put("Last_Processed",zoho.currenttime);
+	updateMap.put("Last_Jobs_Created",totalJobsCreated.toLong());
 
 	updateResponse = zoho.crm.updateRecord("Job_Automation_Config",configRecordId.toLong(),updateMap);
 
