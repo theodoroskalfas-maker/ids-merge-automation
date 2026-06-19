@@ -15,7 +15,7 @@ on:
 jobs:
   create-and-link:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # generous ceiling; a large Relatie view may take a while at 300ms pacing
+    timeout-minutes: 360  # 50k+ Jobs at 300ms pacing can take ~5 hours; GitHub Actions max is 6h
 
     steps:
       - name: Checkout repository
