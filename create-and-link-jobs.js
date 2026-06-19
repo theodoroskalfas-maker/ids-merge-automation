@@ -107,13 +107,30 @@ async function runCreateStage() {
 		throw new Error(`get_relaties_for_create returned an error: ${viewData.error}`);
 	}
 
-	console.log(
-		`View: ${viewData.viewName} | Relaties to process: ${viewData.relatieCount}`
-	);
+	console.log(`View: ${viewData.viewName} | Relaties to process: ${viewData.relatieCount}`);
+	console.log(`Stage 1 keys: ${Object.keys(viewData).join(", ")}`);
 
-	// The Deluge function returns relatieBatches (arrays of 100 IDs each),
-	// not a flat relatieIds list. Flatten for per-Relatie iteration.
-	const relatieIds = viewData.relatieBatches.flat();
+	// The Deluge function returns relatieBatches (arrays of 100 IDs each).
+	// Flatten for per-Relatie iteration. Zoho's map serialization may vary,
+	// so try the expected key first, then fall back to scanning for it.
+	let relatieBatches = viewData.relatieBatches;
+	if (!relatieBatches) {
+		// Zoho map keys are case-sensitive but toString() can mangle them —
+		// try a case-insensitive lookup.
+		const batchKey = Object.keys(viewData).find(
+			(k) => k.toLowerCase() === "relatiebatches"
+		);
+		if (batchKey) relatieBatches = viewData[batchKey];
+	}
+
+	if (!relatieBatches || !Array.isArray(relatieBatches)) {
+		console.error("Stage 1 response (first 2000 chars):", JSON.stringify(viewData).slice(0, 2000));
+		throw new Error(
+			`get_relaties_for_create did not return relatieBatches. Keys found: ${Object.keys(viewData).join(", ")}`
+		);
+	}
+
+	const relatieIds = relatieBatches.flat();
 
 	const fwcMapJson = JSON.stringify(viewData.fwcMap);
 	const campaignMapJson = JSON.stringify(viewData.campaignMap);
