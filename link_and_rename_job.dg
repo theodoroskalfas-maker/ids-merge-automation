@@ -1,0 +1,180 @@
+// ============================================================
+// Standalone Function: link_and_rename_job
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Closes the two gaps in the old Process_Single_View_From_Config:
+//            1. Links Campagnes_Orderlijst (multi-select lookup) via the
+//               nested REST PUT structure documented in Section 5 of the
+//               context reference. zoho.crm.updateRecord CANNOT populate
+//               this field type — must use invokeurl PUT.
+//            2. Renames the Job from "Locatiebezoek-<AutoNumber>" to the
+//               "{Campaign1} I {Campaign2}-{AutoNumber}" format documented
+//               in Section 8, by reading back the auto-generated Name,
+//               extracting the number after the last hyphen, and joining
+//               campaign names with " I ".
+//
+// Called once per Job ID by the GitHub Actions link-and-rename-jobs.js
+// script — same per-record granularity as create_jobs_for_relatie, kept
+// well under the 200k statement limit per execution.
+//
+// Idempotent: safe to re-run on the same Job ID. The REST PUT replaces
+// the full Campagnes_Orderlijst link list each time (no duplicate links
+// from re-running), and the rename re-derives the same name from the
+// same inputs.
+//
+// Parameter: jobId (String)
+//            campaignIdsJson (String) - JSON array of campaign record IDs
+//            campaignNamesJson (String) - JSON array of campaign names,
+//                                         same order as campaignIdsJson,
+//                                         used to build the rename string
+//
+// Returns (JSON string):
+// {
+//   "jobId": "...",
+//   "linked": true|false,
+//   "renamed": true|false,
+//   "newName": "...",
+//   "errors": ["..."]
+// }
+// ============================================================
+string standalone.link_and_rename_job(String jobId, String campaignIdsJson, String campaignNamesJson)
+{
+	campaignIds = campaignIdsJson.toList();
+	campaignNames = campaignNamesJson.toList();
+
+	result = Map();
+	result.put("jobId",jobId);
+	errorsList = List();
+	linked = false;
+	renamed = false;
+	newName = "";
+
+	if(campaignIds.size() == 0)
+	{
+		errorsList.add("No campaign IDs supplied — nothing to link");
+		result.put("linked",false);
+		result.put("renamed",false);
+		result.put("newName",newName);
+		result.put("errors",errorsList);
+		return result.toString();
+	}
+
+	// ----------------------------------------
+	// 1. Link Campagnes_Orderlijst via nested REST PUT
+	//    (Section 5 — field name repeated, each campaign ID wrapped individually)
+	// ----------------------------------------
+	campaignLinksList = List();
+	for each campaignId in campaignIds
+	{
+		linkWrapper = Map();
+		innerMap = Map();
+		innerMap.put("id",campaignId);
+		linkWrapper.put("Campagnes_Orderlijst",innerMap);
+		campaignLinksList.add(linkWrapper);
+	}
+
+	jobDataMap = Map();
+	jobDataMap.put("Campagnes_Orderlijst",campaignLinksList);
+
+	dataList = List();
+	dataList.add(jobDataMap);
+
+	payloadWrapper = Map();
+	payloadWrapper.put("data",dataList);
+
+	linkUrl = "https://www.zohoapis.eu/crm/v5/Locatiebezoeken/" + jobId;
+
+	linkResponse = invokeurl
+	[
+		url :linkUrl
+		type :PUT
+		parameters:payloadWrapper.toString()
+		connection:"zoho_crm_conn"
+	];
+
+	if(linkResponse != null)
+	{
+		responseData = linkResponse.get("data");
+		if(responseData != null && responseData.size() > 0)
+		{
+			firstResult = responseData.get(0);
+			if(firstResult.get("code") == "SUCCESS")
+			{
+				linked = true;
+			}
+			else
+			{
+				errorsList.add("Link PUT returned non-success: " + firstResult.toString());
+			}
+		}
+		else
+		{
+			errorsList.add("Link PUT response had no data array: " + linkResponse.toString());
+		}
+	}
+	else
+	{
+		errorsList.add("Link PUT returned null response");
+	}
+
+	// ----------------------------------------
+	// 2. Rename — only proceed if link succeeded, so the Job isn't
+	//    renamed with a campaign that failed to link
+	// ----------------------------------------
+	if(linked)
+	{
+		jobRecord = zoho.crm.getRecordById("Locatiebezoeken",jobId.toLong());
+		currentName = jobRecord.get("Name");
+
+		if(currentName != null && currentName.contains("-"))
+		{
+			autoNumber = currentName.getSuffix("-");
+
+			campaignNamesJoined = "";
+			campaignCounter = 0;
+			for each cName in campaignNames
+			{
+				if(campaignCounter == 0)
+				{
+					campaignNamesJoined = cName;
+				}
+				else
+				{
+					campaignNamesJoined = campaignNamesJoined + " I " + cName;
+				}
+				campaignCounter = campaignCounter + 1;
+			}
+
+			if(campaignNamesJoined == "")
+			{
+				newName = "Job-" + autoNumber;
+			}
+			else
+			{
+				newName = campaignNamesJoined + "-" + autoNumber;
+			}
+
+			renameData = Map();
+			renameData.put("Name",newName);
+			renameResponse = zoho.crm.updateRecord("Locatiebezoeken",jobId.toLong(),renameData);
+
+			if(renameResponse != null && renameResponse.get("id") != null)
+			{
+				renamed = true;
+			}
+			else
+			{
+				errorsList.add("Rename update failed: " + renameResponse.toString());
+			}
+		}
+		else
+		{
+			errorsList.add("Could not parse AutoNumber from current Name: " + currentName);
+		}
+	}
+
+	result.put("linked",linked);
+	result.put("renamed",renamed);
+	result.put("newName",newName);
+	result.put("errors",errorsList);
+	return result.toString();
+}

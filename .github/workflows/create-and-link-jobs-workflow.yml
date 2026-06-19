@@ -1,0 +1,34 @@
+name: Create and Link Jobs
+
+on:
+  workflow_dispatch:
+    inputs:
+      configRecordId:
+        description: "Job_Automation_Config record ID (fresh run: create + link + rename)"
+        required: false
+        type: string
+      jobLinkQueueJson:
+        description: "OPTIONAL retry-only input: JSON array of {jobId, campaignIds, campaignNames} to skip straight to link/rename"
+        required: false
+        type: string
+
+jobs:
+  create-and-link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # generous ceiling; a large Relatie view may take a while at 300ms pacing
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run create-and-link-jobs.js
+        env:
+          ZOHO_API_KEY: ${{ secrets.ZOHO_API_KEY }}
+          CONFIG_RECORD_ID: ${{ github.event.inputs.configRecordId }}
+          JOB_LINK_QUEUE_JSON: ${{ github.event.inputs.jobLinkQueueJson }}
+        run: node create-and-link-jobs.js

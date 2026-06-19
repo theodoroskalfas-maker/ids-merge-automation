@@ -1,0 +1,205 @@
+// ============================================================
+// Standalone Function: create_jobs_for_relatie
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Per-Relatie replacement for the inner loop body of the old
+//          Process_Single_View_From_Config / Bulk_Create_Jobs_OPTIMIZED
+//          function. Called once per Relatie ID by the GitHub Actions
+//          create-jobs.js script — keeps each Zoho execution tiny and
+//          far under the 200k statement / 5-minute limits even when
+//          the source view has 20,000 Relaties.
+//
+// IMPORTANT FIXES vs. the old in-Zoho version:
+//   1. Campagnes_Orderlijst (multi-select lookup) is NOT settable via
+//      createRecord — this function only creates the Job with its
+//      scalar fields (incl. Campaign_Checklist for widget display) and
+//      returns the campaign ID(s) that still need linking. The actual
+//      REST PUT link happens in link_and_rename_job, per Section 5 of
+//      the context reference (multi-select lookups require the nested
+//      REST structure, never zoho.crm.createRecord/updateRecord).
+//   2. Job rename ("{Campaign1} I {Campaign2}-{AutoNumber}", Section 8)
+//      is NOT done here — it requires reading back the auto-generated
+//      Name after creation, which link_and_rename_job also handles,
+//      once per Job, after the campaign link succeeds.
+//   3. Gemeente is read directly from the Relatie (confirmed real,
+//      undocumented field — kept as-is).
+//
+// Parameter: relatieId (String)
+//            fwcMapJson (String)      - JSON map of FWC name -> id
+//            campaignMapJson (String) - JSON map of Campaign name -> id
+//
+// Returns (JSON string):
+// {
+//   "relatieId": "...",
+//   "jobsCreated": [
+//     { "jobId": "...", "campaignIds": ["...", "..."] },
+//     ...
+//   ],
+//   "skipped": true|false,
+//   "errors": ["..."]
+// }
+// ============================================================
+string standalone.create_jobs_for_relatie(String relatieId, String fwcMapJson, String campaignMapJson)
+{
+	fwcMap = fwcMapJson.toMap();
+	campaignMap = campaignMapJson.toMap();
+
+	result = Map();
+	result.put("relatieId",relatieId);
+	errorsList = List();
+	jobsCreatedList = List();
+
+	relatieRecord = zoho.crm.getRecordById("Accounts",relatieId.toLong());
+	if(relatieRecord == null)
+	{
+		errorsList.add("Relatie not found: " + relatieId);
+		result.put("jobsCreated",jobsCreatedList);
+		result.put("skipped",true);
+		result.put("errors",errorsList);
+		return result.toString();
+	}
+
+	accountName = relatieRecord.get("Account_Name");
+	if(accountName == null)
+	{
+		accountName = "Relatie-" + relatieId;
+	}
+
+	selectedValues = relatieRecord.get("Toevoegen_aan_FWC");
+	if(selectedValues == null || selectedValues == "")
+	{
+		result.put("jobsCreated",jobsCreatedList);
+		result.put("skipped",true);
+		result.put("errors",errorsList);
+		return result.toString();
+	}
+
+	selectedValuesList = List();
+	try
+	{
+		if(selectedValues.size() > 0)
+		{
+			selectedValuesList = selectedValues;
+		}
+	}
+	catch (e)
+	{
+		selectedValuesList.add(selectedValues.toString());
+	}
+
+	// Split into FWC names (Y/y + 2-digit year, e.g. Y27R02) vs campaign names
+	fwcNamesList = List();
+	campaignNamesList = List();
+	for each itemName in selectedValuesList
+	{
+		itemTrimmed = itemName.trim();
+		isFWC = false;
+		if(itemTrimmed.length() >= 3)
+		{
+			firstChar = itemTrimmed.left(1);
+			if(firstChar == "Y" || firstChar == "y")
+			{
+				secondThird = itemTrimmed.substring(1,3);
+				try
+				{
+					yearNum = secondThird.toLong();
+					if(yearNum > 0)
+					{
+						isFWC = true;
+					}
+				}
+				catch (e)
+				{
+					isFWC = false;
+				}
+			}
+		}
+		if(isFWC)
+		{
+			fwcNamesList.add(itemTrimmed);
+		}
+		else
+		{
+			campaignNamesList.add(itemTrimmed);
+		}
+	}
+
+	if(fwcNamesList.size() == 0)
+	{
+		result.put("jobsCreated",jobsCreatedList);
+		result.put("skipped",true);
+		result.put("errors",errorsList);
+		return result.toString();
+	}
+
+	for each selectedFWCName in fwcNamesList
+	{
+		if(!fwcMap.containKey(selectedFWCName))
+		{
+			errorsList.add("FWC not found in map: " + selectedFWCName);
+			continue;
+		}
+		fwcId = fwcMap.get(selectedFWCName);
+
+		if(campaignNamesList.size() == 0)
+		{
+			continue;
+		}
+
+		for each campaignName in campaignNamesList
+		{
+			campaignNameTrimmed = campaignName.trim();
+			if(!campaignMap.containKey(campaignNameTrimmed))
+			{
+				errorsList.add("Campaign not found in map: " + campaignNameTrimmed);
+				continue;
+			}
+			campaignId = campaignMap.get(campaignNameTrimmed);
+
+			jobData = Map();
+			jobData.put("Name",accountName + " - " + selectedFWCName);
+			jobData.put("Klant",relatieId.toLong());
+			jobData.put("Field_Work_Cycle",fwcId.toLong());
+			jobData.put("Status","Open");
+			jobData.put("Campaign_Checklist",campaignNameTrimmed);
+			jobData.put("Opmerkingen_uit_Locatie_record",relatieRecord.get("Interne_situatie_locatie"));
+			jobData.put("Opmerking_Kantoor_uit_Locatie_record",relatieRecord.get("Opmerking_Kantoor"));
+			jobData.put("Aantal_Huisartsen",relatieRecord.get("Aantal_Huisartsen"));
+			jobData.put("POH",relatieRecord.get("POH"));
+			jobData.put("Di_tiste",relatieRecord.get("Di_tiste"));
+			jobData.put("Beeldschermen",relatieRecord.get("Beeldschermen"));
+			jobData.put("Postadres_straat",relatieRecord.get("Billing_Street"));
+			jobData.put("Postadres_huisnummer",relatieRecord.get("Postadres_huisnummer"));
+			jobData.put("Postadres_huisnummertoevoeging",relatieRecord.get("Postadres_huisnummertoevoeging"));
+			jobData.put("Postadres_Plaats",relatieRecord.get("Billing_City"));
+			jobData.put("Postadres_postcode",relatieRecord.get("Billing_Code"));
+			jobData.put("Postadres_land",relatieRecord.get("Billing_Country"));
+			jobData.put("Gemeente_Locatie",relatieRecord.get("Gemeente"));
+			jobData.put("Provincie_locatie",relatieRecord.get("Provincie"));
+			jobData.put("Rayon_Locatie",relatieRecord.get("Rayon"));
+			jobData.put("Asset_Types",relatieRecord.get("Assets"));
+			jobData.put("Network_Audience",relatieRecord.get("Network_Audience"));
+
+			createResponse = zoho.crm.createRecord("Locatiebezoeken",jobData,{"trigger":{"workflow"}});
+
+			if(createResponse != null && createResponse.get("id") != null)
+			{
+				newJobId = createResponse.get("id").toString();
+				jobEntry = Map();
+				jobEntry.put("jobId",newJobId);
+				campaignIdsForJob = List();
+				campaignIdsForJob.add(campaignId.toString());
+				jobEntry.put("campaignIds",campaignIdsForJob);
+				jobsCreatedList.add(jobEntry);
+			}
+			else
+			{
+				errorsList.add("Create failed for FWC=" + selectedFWCName + " Campaign=" + campaignNameTrimmed);
+			}
+		}
+	}
+
+	result.put("jobsCreated",jobsCreatedList);
+	result.put("skipped",false);
+	result.put("errors",errorsList);
+	return result.toString();
+}

@@ -1,0 +1,171 @@
+// ============================================================
+// Standalone Function: get_relaties_for_create
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Companion to Bulk_Create_Jobs_OPTIMIZED, but built for
+//          the GitHub Actions split. Reads the Job_Automation_Config
+//          record, pages through the linked Relaties custom view,
+//          pre-loads the FWC + Campaign lookup maps ONCE, and
+//          CHUNKS the Relatie IDs into batches of 100. Returns
+//          everything GitHub Actions needs to drive the batch loop
+//          without Zoho re-fetching maps every call and without the
+//          JS side needing its own chunking logic.
+//
+// Why this exists: paging a 20,000-record view (100 pages) plus
+// pre-loading FWC/Campaign maps is well inside Zoho's 200k statement
+// limit on its own — it's the PER-RELATIE Job creation work (string
+// splitting, map lookups, bulkCreate, repeated for thousands of
+// Relaties) that blows the 5-minute button timeout. So this function
+// only does the cheap part: list-building + batch-chunking. The
+// expensive part moves to create_jobs_for_relatie_batch, called once
+// per batch of 100 Relaties from GitHub Actions — NOT once per
+// Relatie. Batching cuts total Zoho API calls per run by roughly
+// 100x compared to a one-call-per-Relatie design (e.g. ~200 calls
+// instead of ~20,000 for a 20,000-Relatie view).
+//
+// Parameter: configRecordId (String) — Job_Automation_Config record ID
+// Returns (JSON string): {
+//   viewName, customViewId, relatieCount, batchCount,
+//   relatieBatches: [ ["id1","id2",...,"id100"], ["id101",...], ... ],
+//   fwcMap: { "Y27R02": "<id>", ... },
+//   campaignMap: { "Obesitas Brochure": "<id>", ... }
+// }
+// ============================================================
+string standalone.get_relaties_for_create(String configRecordId)
+{
+	info "========== GET RELATIES FOR CREATE ==========";
+	info "Config Record ID: " + configRecordId;
+
+	configRecord = zoho.crm.getRecordById("Job_Automation_Config",configRecordId.toLong());
+	viewName = configRecord.get("Name");
+	customViewId = configRecord.get("Relatie_Custom_View_ID");
+
+	if(customViewId == null || customViewId == "")
+	{
+		errorResult = Map();
+		errorResult.put("error","No Custom View ID configured on this Job_Automation_Config record");
+		return errorResult.toString();
+	}
+
+	// ----------------------------------------------------
+	// Pre-load FWC map (same pagination ceiling as the original function)
+	// ----------------------------------------------------
+	fwcMap = Map();
+	fwcPagesList = {1,2,3,4,5};
+	for each pageNum in fwcPagesList
+	{
+		fwcPage = zoho.crm.getRecords("Bezoekrondes",pageNum,200);
+		if(fwcPage == null || fwcPage.size() == 0)
+		{
+			break;
+		}
+		for each fwc in fwcPage
+		{
+			fwcMap.put(fwc.get("Name"),fwc.get("id"));
+		}
+	}
+	info "Pre-loaded " + fwcMap.keys().size() + " FWCs";
+
+	// ----------------------------------------------------
+	// Pre-load Campaign map
+	// ----------------------------------------------------
+	campaignMap = Map();
+	campaignPagesList = {1,2,3,4,5,6,7,8,9,10};
+	for each pageNum in campaignPagesList
+	{
+		campaignPage = zoho.crm.getRecords("Campagnes_Orderlijst",pageNum,200);
+		if(campaignPage == null || campaignPage.size() == 0)
+		{
+			break;
+		}
+		for each campaign in campaignPage
+		{
+			campaignMap.put(campaign.get("Name"),campaign.get("id"));
+		}
+	}
+	info "Pre-loaded " + campaignMap.keys().size() + " Campaigns";
+
+	// ----------------------------------------------------
+	// Page through the Relaties custom view, collect IDs only.
+	// No per-record processing here — that is the whole point of
+	// the split. Up to 100 pages x 200 = 20,000 Relaties, same
+	// ceiling as the original monolithic function.
+	// ----------------------------------------------------
+	relatieIds = List();
+	perPage = 200;
+	pagesList = List();
+	for i in 1 to 100
+	{
+		pagesList.add(i);
+	}
+
+	for each pageNum in pagesList
+	{
+		relatieRecords = zoho.crm.getRecords("Accounts",pageNum,perPage,{"cvid":customViewId});
+		if(relatieRecords == null || relatieRecords.size() == 0)
+		{
+			break;
+		}
+		recordsOnPage = relatieRecords.size();
+		info "Page " + pageNum + ": " + recordsOnPage + " records";
+
+		for each relatieRecord in relatieRecords
+		{
+			relatieIds.add(relatieRecord.get("id").toString());
+		}
+
+		if(recordsOnPage < perPage)
+		{
+			break;
+		}
+	}
+
+	info "Total Relaties in view: " + relatieIds.size();
+
+	// ----------------------------------------------------
+	// Chunk relatieIds into batches of 100. Each batch becomes one
+	// call to create_jobs_for_relatie_batch from GitHub Actions —
+	// this is the change that collapses ~20,000 calls down to ~200.
+	// ----------------------------------------------------
+	relatieBatches = List();
+	currentBatch = List();
+	for each idVal in relatieIds
+	{
+		currentBatch.add(idVal);
+		if(currentBatch.size() >= 100)
+		{
+			relatieBatches.add(currentBatch);
+			currentBatch = List();
+		}
+	}
+	if(currentBatch.size() > 0)
+	{
+		relatieBatches.add(currentBatch);
+	}
+	info "Chunked into " + relatieBatches.size() + " batches of up to 100";
+
+	// Update config record with run metadata (mirrors original timestamp behavior)
+	timestampPayload = Map();
+	timestampPayload.put("Mass_Create_Last_Run",zoho.currenttime.toString("yyyy-MM-dd'T'HH:mm:ss+00:00"));
+	timestampData = List();
+	timestampData.add(timestampPayload);
+	timestampWrapper = Map();
+	timestampWrapper.put("data",timestampData);
+	timestampResponse = invokeurl
+	[
+		url :"https://www.zohoapis.eu/crm/v8/Job_Automation_Config/" + configRecordId
+		type :PUT
+		parameters:timestampWrapper.toString()
+		connection:"zoho_crm_conn"
+	];
+
+	result = Map();
+	result.put("viewName",viewName);
+	result.put("customViewId",customViewId);
+	result.put("relatieCount",relatieIds.size());
+	result.put("batchCount",relatieBatches.size());
+	result.put("relatieBatches",relatieBatches);
+	result.put("fwcMap",fwcMap);
+	result.put("campaignMap",campaignMap);
+
+	return result.toString();
+}
