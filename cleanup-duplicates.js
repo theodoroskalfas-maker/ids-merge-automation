@@ -56,14 +56,20 @@ async function callZohoFunction(functionApiName, params) {
 	const url = new URL(`${BASE_URL}/${functionApiName}/actions/execute`);
 	url.searchParams.set("auth_type", "apikey");
 	url.searchParams.set("zapikey", ZOHO_API_KEY);
-	for (const [key, value] of Object.entries(params)) {
-		url.searchParams.set(key, value);
-	}
+
+	// Pass function arguments in the POST body instead of URL query
+	// params — jobIdsJson with 500 IDs exceeds URL length limits and
+	// makes Zoho return an HTML error page instead of JSON.
+	const body = JSON.stringify({ arguments: params });
 
 	let lastError = null;
 	for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
 		try {
-			const response = await fetch(url.toString(), { method: "POST" });
+			const response = await fetch(url.toString(), {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body,
+			});
 			const data = await response.json();
 
 			// Zoho function-execute can return wrapped or unwrapped shape
