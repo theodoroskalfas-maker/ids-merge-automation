@@ -1,0 +1,51 @@
+// ============================================================
+// Button: Merge_Jobs_to_Locatiebezoek_v5
+// Type: Button function on Bezoekrondes (FWC) module
+// Purpose: Triggers the GitHub Actions workflow that runs the
+//          full merge process externally (no Zoho execution
+//          limits apply there). This function only fires the
+//          GitHub API call and returns immediately.
+//
+// Requires a GitHub Personal Access Token with 'repo' and
+// 'workflow' scopes. SANDBOX-FIRST: token is inline here for
+// initial testing — move to a secured connection or Zoho Vault
+// equivalent before using in production.
+//
+// GitHub repo: theodoroskalfas-maker/ids-merge-automation
+// Workflow file: .github/workflows/merge-jobs-workflow.yml
+// ============================================================
+string button.Merge_Jobs_to_Locatiebezoek_v5(String fwcId)
+{
+	githubToken = "<<PASTE_GITHUB_PAT_HERE>>"; // TODO: move to secure storage before production
+	githubOwner = "theodoroskalfas-maker";
+	githubRepo = "ids-merge-automation";
+	workflowFileName = "merge-jobs-workflow.yml";
+
+	dispatchBody = Map();
+	dispatchBody.put("ref","main"); // branch to run the workflow from
+	inputsMap = Map();
+	inputsMap.put("fwcId",fwcId);
+	dispatchBody.put("inputs",inputsMap);
+
+	dispatchUrl = "https://api.github.com/repos/" + githubOwner + "/" + githubRepo + "/actions/workflows/" + workflowFileName + "/dispatches";
+
+	headersMap = Map();
+	headersMap.put("Authorization","Bearer " + githubToken);
+	headersMap.put("Accept","application/vnd.github+json");
+	headersMap.put("Content-Type","application/json");
+
+	response = invokeurl
+	[
+		url :dispatchUrl
+		type :POST
+		parameters:dispatchBody.toString()
+		headers:headersMap
+	];
+
+	// GitHub's workflow_dispatch endpoint returns HTTP 204 (no content) on success.
+	// invokeurl in Deluge may surface this as an empty response or a status field
+	// depending on the response wrapper — verify in sandbox what 'response' actually
+	// contains before relying on its contents for error handling.
+
+	return "Merge started via GitHub Actions for this Field Work Cycle. Check the Actions tab in the ids-merge-automation repo for live progress. This typically takes 30-90 minutes for large FWCs.";
+}

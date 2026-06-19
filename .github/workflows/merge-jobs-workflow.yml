@@ -1,0 +1,32 @@
+name: Merge Jobs to Locatiebezoek
+
+# Triggered either manually from the GitHub UI ("Run workflow" button)
+# or programmatically via the GitHub REST API workflow_dispatch endpoint,
+# which is what the Zoho CRM button calls.
+on:
+  workflow_dispatch:
+    inputs:
+      fwcId:
+        description: "Field Work Cycle record ID to merge"
+        required: true
+        type: string
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # generous ceiling; a 4,000-location run should finish well under this
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run merge script
+        env:
+          ZOHO_API_KEY: ${{ secrets.ZOHO_API_KEY }}
+          FWC_ID: ${{ inputs.fwcId }}
+        run: node merge-jobs.js
