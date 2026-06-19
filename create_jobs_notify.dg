@@ -1,0 +1,34 @@
+// ============================================================
+// Standalone Function: create_jobs_notify
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Called by create-and-link-jobs.js after all three stages
+//          complete. Writes the run summary into the
+//          Last_Created_Records multiline field on the
+//          Job_Automation_Config record for audit trail.
+//
+// Parameter: configRecordId (String) — Job_Automation_Config record ID
+//            summary (String) — multiline run summary
+//
+// Returns (JSON string): { "fieldUpdateStatus": "success"|"failed" }
+// ============================================================
+string standalone.create_jobs_notify(String configRecordId, String summary)
+{
+	result = Map();
+
+	updateMap = Map();
+	updateMap.put("Last_Created_Records",summary);
+
+	updateResponse = zoho.crm.updateRecord("Job_Automation_Config",configRecordId.toLong(),updateMap);
+
+	if(updateResponse != null && updateResponse.get("id") != null)
+	{
+		result.put("fieldUpdateStatus","success");
+	}
+	else
+	{
+		result.put("fieldUpdateStatus","failed");
+		result.put("detail",updateResponse.toString());
+	}
+
+	return result.toString();
+}

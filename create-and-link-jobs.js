@@ -183,7 +183,14 @@ async function runCreateStage() {
 		`Stage 2 complete. Processed: ${processed} | Skipped: ${skipped} | Errors: ${createErrors} | Jobs to link: ${jobLinkQueue.length}`
 	);
 
-	return jobLinkQueue;
+	return {
+		jobLinkQueue,
+		viewName: viewData.viewName,
+		relatieCount: relatieIds.length,
+		processed,
+		skipped,
+		createErrors,
+	};
 }
 
 async function runLinkStage(jobLinkQueue) {
@@ -223,6 +230,8 @@ async function runLinkStage(jobLinkQueue) {
 	console.log(
 		`Stage 3 complete. Linked: ${linked} | Renamed: ${renamed} | Errors: ${linkErrors}`
 	);
+
+	return { linked, renamed, linkErrors };
 }
 
 async function main() {
@@ -232,6 +241,7 @@ async function main() {
 	}
 
 	let jobLinkQueue;
+	let createStats = null;
 
 	if (JOB_LINK_QUEUE_JSON) {
 		console.log("JOB_LINK_QUEUE_JSON provided — skipping stages 1-2, retrying link/rename only.");
@@ -241,7 +251,9 @@ async function main() {
 			console.error("Missing required environment variable CONFIG_RECORD_ID.");
 			process.exit(1);
 		}
-		jobLinkQueue = await runCreateStage();
+		const createResult = await runCreateStage();
+		jobLinkQueue = createResult.jobLinkQueue;
+		createStats = createResult;
 	}
 
 	if (jobLinkQueue.length === 0) {
@@ -249,9 +261,45 @@ async function main() {
 		return;
 	}
 
-	await runLinkStage(jobLinkQueue);
+	const linkStats = await runLinkStage(jobLinkQueue);
 
 	console.log("=== Full run complete ===");
+
+	// Write summary to Last_Created_Records on the Job_Automation_Config record
+	if (CONFIG_RECORD_ID) {
+		const totalErrors = (createStats?.createErrors || 0) + linkStats.linkErrors;
+		const hasErrors = totalErrors > 0;
+
+		const summary = [
+			`Create completed: ${new Date().toISOString()}`,
+			`View: ${createStats?.viewName || "N/A"}`,
+			`Total Relaties: ${createStats?.relatieCount || "N/A"}`,
+			`Processed: ${createStats?.processed || "N/A"}`,
+			`Skipped: ${createStats?.skipped || "N/A"}`,
+			`Jobs created: ${jobLinkQueue.length}`,
+			`Jobs linked: ${linkStats.linked}`,
+			`Jobs renamed: ${linkStats.renamed}`,
+			`Errors: ${totalErrors}`,
+			hasErrors ? "Status: COMPLETED WITH ERRORS" : "Status: SUCCESS",
+		].join("\n");
+
+		console.log("\n" + summary);
+
+		try {
+			const notifyResult = await callZohoFunction("create_jobs_notify", {
+				configRecordId: CONFIG_RECORD_ID,
+				summary: summary,
+			});
+			const parsed = typeof notifyResult === "string" ? JSON.parse(notifyResult) : notifyResult;
+			console.log(`\nZoho notification: field update ${parsed.fieldUpdateStatus || "unknown"}`);
+		} catch (err) {
+			console.warn(`\nFailed to send Zoho notification: ${err.message}`);
+		}
+
+		if (hasErrors) {
+			process.exitCode = 1;
+		}
+	}
 }
 
 main().catch((err) => {
