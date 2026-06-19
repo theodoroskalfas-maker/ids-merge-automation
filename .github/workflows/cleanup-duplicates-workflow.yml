@@ -14,7 +14,7 @@ on:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # generous ceiling; even a large duplicate set should finish well under this
+    timeout-minutes: 360  # GitHub Actions max (6 hours) — large duplicate sets with batch size 50 need room
 
     steps:
       - name: Checkout repository
