@@ -53,8 +53,12 @@ async function callZohoFunction(functionApiName, params) {
 			const response = await fetch(url.toString(), { method: "POST" });
 			const data = await response.json();
 
-			if (data?.response?.code === "success") {
-				return data.response.details.output;
+			// Zoho REST API returns two possible shapes:
+			//   Wrapped:   { response: { code, details: { output } } }
+			//   Unwrapped: { code, details: { output } }
+			const inner = data?.response ?? data;
+			if (inner?.code === "success") {
+				return inner.details.output;
 			}
 
 			lastError = new Error(
