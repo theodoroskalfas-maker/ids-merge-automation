@@ -193,12 +193,12 @@ async function deleteBatches(duplicateIds, fwcNames, duplicateCombinations) {
 
 	console.log(`\nTotal Job IDs to delete: ${duplicateIds.length} (in ${batches.length} batches)`);
 
+	const results = { deleted: 0, errors: [] };
+
 	if (duplicateIds.length === 0) {
 		console.log("No duplicates found. Nothing to delete.");
-		return;
+		return results;
 	}
-
-	const results = { deleted: 0, errors: [] };
 
 	for (let i = 0; i < batches.length; i++) {
 		const batch = batches[i];
@@ -244,6 +244,8 @@ async function deleteBatches(duplicateIds, fwcNames, duplicateCombinations) {
 		}
 		process.exitCode = 1;
 	}
+
+	return results;
 }
 
 async function main() {
@@ -266,9 +268,38 @@ async function main() {
 	console.log(`Duplicate combinations found: ${duplicateCombinations}`);
 	console.log(`Duplicate Job IDs to delete: ${duplicateIds.length}`);
 
-	// Stage 3: delete in batches (one Zoho call per 500 IDs)
+	// Stage 3: delete in batches
 	console.log("\n=== Stage 3: Deleting duplicate batches ===");
-	await deleteBatches(duplicateIds, fwcNames, duplicateCombinations);
+	const deleteResults = await deleteBatches(duplicateIds, fwcNames, duplicateCombinations);
+
+	// Stage 4: write cleanup summary to the config record
+	console.log("\n=== Stage 4: Updating cleanup log ===");
+	const status = deleteResults.errors.length === 0 ? "SUCCESS" : "PARTIAL";
+	const logLines = [
+		`Cleanup completed: ${new Date().toISOString()}`,
+		`FWC: ${fwcNames.join("; ")}`,
+		`Total scoped jobs: ${allRows.length}`,
+		`Duplicate combinations: ${duplicateCombinations}`,
+		`Duplicates deleted: ${deleteResults.deleted}`,
+		`Errors: ${deleteResults.errors.length}`,
+		`Status: ${status}`,
+	];
+	const logText = logLines.join("\n");
+
+	try {
+		const logRaw = await callZohoFunction("update_cleanup_log", {
+			configRecordId: CONFIG_RECORD_ID,
+			logText,
+		});
+		const logResult = JSON.parse(logRaw);
+		if (logResult.status === "success") {
+			console.log("Cleanup log written to config record.");
+		} else {
+			console.warn(`Failed to write cleanup log: ${logResult.error}`);
+		}
+	} catch (err) {
+		console.warn(`Failed to write cleanup log: ${err.message}`);
+	}
 }
 
 main().catch((err) => {

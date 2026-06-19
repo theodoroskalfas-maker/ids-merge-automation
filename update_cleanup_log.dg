@@ -1,0 +1,35 @@
+// ============================================================
+// Standalone Function: update_cleanup_log
+// Type: Standalone, exposed via REST API (auth_type=apikey)
+// Purpose: Writes the cleanup summary to the Last_Duplicate_Cleanup_Log
+//          field on the Job_Automation_Config record. Called once by
+//          GitHub Actions at the end of the cleanup pipeline.
+//
+// Parameters:
+//   configRecordId (String) — the Job_Automation_Config record ID
+//   logText        (String) — the summary text to write
+//
+// Returns (JSON string):
+// { "status": "success" | "error", "error": "..." }
+// ============================================================
+string standalone.update_cleanup_log(String configRecordId, String logText)
+{
+	result = Map();
+
+	updateMap = Map();
+	updateMap.put("Last_Duplicate_Cleanup_Log",logText);
+
+	updateResponse = zoho.crm.updateRecord("Job_Automation_Config",configRecordId.toLong(),updateMap);
+
+	if(updateResponse != null && updateResponse.get("id") != null)
+	{
+		result.put("status","success");
+	}
+	else
+	{
+		result.put("status","error");
+		result.put("error","Update failed: " + updateResponse.toString());
+	}
+
+	return result.toString();
+}
