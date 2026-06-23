@@ -86,34 +86,14 @@ string standalone.create_jobs_for_relatie(String relatieId, String fwcMapJson, S
 		selectedValuesList.add(selectedValues.toString());
 	}
 
-	// Split into FWC names (Y/y + 2-digit year, e.g. Y27R02) vs campaign names
+	// Split into FWC names vs campaign names using the pre-loaded maps.
+	// If the value exists as a key in fwcMap, it's an FWC; otherwise it's a campaign.
 	fwcNamesList = List();
 	campaignNamesList = List();
 	for each itemName in selectedValuesList
 	{
 		itemTrimmed = itemName.trim();
-		isFWC = false;
-		if(itemTrimmed.length() >= 3)
-		{
-			firstChar = itemTrimmed.left(1);
-			if(firstChar == "Y" || firstChar == "y")
-			{
-				secondThird = itemTrimmed.substring(1,3);
-				try
-				{
-					yearNum = secondThird.toLong();
-					if(yearNum > 0)
-					{
-						isFWC = true;
-					}
-				}
-				catch (e)
-				{
-					isFWC = false;
-				}
-			}
-		}
-		if(isFWC)
+		if(fwcMap.containKey(itemTrimmed))
 		{
 			fwcNamesList.add(itemTrimmed);
 		}
