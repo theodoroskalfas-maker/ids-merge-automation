@@ -1,8 +1,6 @@
 name: Cleanup Duplicate Jobs
+run-name: "Cleanup Duplicate Jobs [${{ inputs.configRecordId || 'manual' }}]"
 
-# Triggered either manually from the GitHub UI ("Run workflow" button)
-# or programmatically via the GitHub REST API workflow_dispatch
-# endpoint, which is what the Zoho CRM button calls.
 on:
   workflow_dispatch:
     inputs:

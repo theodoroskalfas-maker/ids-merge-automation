@@ -1,4 +1,5 @@
 name: Create and Link Jobs
+run-name: "Create and Link Jobs [${{ inputs.configRecordId || 'manual' }}]"
 
 on:
   workflow_dispatch:
