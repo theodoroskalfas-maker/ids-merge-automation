@@ -1,8 +1,6 @@
 name: Merge Jobs to Locatiebezoek
+run-name: "Merge Jobs [${{ inputs.fwcId || 'manual' }}]"
 
-# Triggered either manually from the GitHub UI ("Run workflow" button)
-# or programmatically via the GitHub REST API workflow_dispatch endpoint,
-# which is what the Zoho CRM button calls.
 on:
   workflow_dispatch:
     inputs:

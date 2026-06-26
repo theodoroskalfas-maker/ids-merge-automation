@@ -2,9 +2,9 @@
 # Each ZIP gets its own WORKFLOW_FILE and WIDGET_TITLE baked in.
 
 $widgets = @(
-    @{ Name = "github_mass_create_widget";   WorkflowFile = "create-and-link-jobs-workflow.yml";  Title = "Mass Create Jobs" },
-    @{ Name = "github_merge_jobs_widget";    WorkflowFile = "merge-jobs-workflow.yml";            Title = "Merge Jobs" },
-    @{ Name = "github_cleanup_dupes_widget"; WorkflowFile = "cleanup-duplicates-workflow.yml";    Title = "Cleanup Duplicates" }
+    @{ Name = "github_mass_create_widget";   WorkflowFile = "create-and-link-jobs-workflow.yml";  Title = "Mass Create Jobs";    Module = "Job_Automation_Config"; NameField = "Name" },
+    @{ Name = "github_merge_jobs_widget";    WorkflowFile = "merge-jobs-workflow.yml";            Title = "Merge Jobs";          Module = "Bezoekronden";          NameField = "Name" },
+    @{ Name = "github_cleanup_dupes_widget"; WorkflowFile = "cleanup-duplicates-workflow.yml";    Title = "Cleanup Duplicates";  Module = "Job_Automation_Config"; NameField = "Name" }
 )
 
 $scriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -19,7 +19,7 @@ foreach ($w in $widgets) {
     $zipPath = "$distDir\$($w.Name).zip"
     if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force -Confirm:$false }
 
-    $customJs = $templateJs.Replace('%%WORKFLOW_FILE%%', $w.WorkflowFile).Replace('%%WIDGET_TITLE%%', $w.Title)
+    $customJs = $templateJs.Replace('%%WORKFLOW_FILE%%', $w.WorkflowFile).Replace('%%WIDGET_TITLE%%', $w.Title).Replace('%%ZOHO_MODULE%%', $w.Module).Replace('%%ZOHO_NAME_FIELD%%', $w.NameField)
 
     $fs = New-Object System.IO.FileStream($zipPath, [System.IO.FileMode]::Create)
     $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create, $false)

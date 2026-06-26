@@ -19,6 +19,8 @@
     var REPO = "ids-merge-automation";
     var WORKFLOW_FILE = "%%WORKFLOW_FILE%%";
     var WIDGET_TITLE = "%%WIDGET_TITLE%%";
+    var ZOHO_MODULE = "%%ZOHO_MODULE%%";
+    var ZOHO_NAME_FIELD = "%%ZOHO_NAME_FIELD%%";
     var API_BASE = "https://api.github.com";
     var RUNS_PER_PAGE = 30;
     var REFRESH_INTERVAL_ACTIVE = 10000;
@@ -28,6 +30,8 @@
     var refreshTimer = null;
     var entityId = null;
     var fwcName = null;
+    var configName = null;
+    var recordLabel = null;
 
     // ---- DOM refs ----
     var $loading = document.getElementById("loadingState");
@@ -82,14 +86,16 @@
         }
 
         ZOHO.CRM.API.getRecord({
-            Entity: "Job_Automation_Config",
+            Entity: ZOHO_MODULE,
             RecordID: entityId
         }).then(function (resp) {
             if (resp && resp.data && resp.data.length > 0) {
                 var record = resp.data[0];
                 fwcName = record.FWC || null;
-                if (fwcName) {
-                    document.getElementById("widgetTitle").textContent = WIDGET_TITLE + " — " + fwcName;
+                configName = record[ZOHO_NAME_FIELD] || record.Name || null;
+                recordLabel = configName || fwcName || null;
+                if (recordLabel) {
+                    document.getElementById("widgetTitle").textContent = WIDGET_TITLE + " — " + recordLabel;
                 }
             }
             loadToken();
@@ -225,9 +231,10 @@
 
     function getRunDisplayName(run) {
         var title = run.display_title || run.name || "Workflow #" + run.run_number;
-        // Replace the [recordId] tag with the FWC name if available
-        if (fwcName && entityId) {
-            title = title.replace("[" + entityId + "]", fwcName);
+        // Replace the [recordId] tag with human-readable label
+        if (entityId) {
+            var replacement = recordLabel || fwcName || "";
+            title = title.replace(" [" + entityId + "]", replacement ? " " + replacement : "");
         }
         return title;
     }
