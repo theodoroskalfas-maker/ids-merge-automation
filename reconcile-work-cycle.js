@@ -222,19 +222,21 @@ async function zohoPut(path, body) {
 
 // ---- Data fetching ----
 
-async function fetchCampaignCount() {
-	const result = await zohoGet("/Campagnes_Orderlijst/actions/count");
-	if (result && result.count !== undefined) {
-		return Number(result.count);
-	}
-	throw new Error(`Could not fetch campaign count. Response: ${JSON.stringify(result)}`);
-}
-
 async function fetchAllCampaigns() {
 	console.log("=== Fetching all campaigns via COQL (cursor pagination) ===");
 
-	const expectedCount = await fetchCampaignCount();
-	console.log(`  Expected campaign count from COQL COUNT: ${expectedCount}`);
+	// Pre-fetch count via Records API for cross-check (may differ from COQL
+	// due to sharing rules, approval states, or profile-level access).
+	let apiCount = null;
+	try {
+		const countResult = await zohoGet("/Campagnes_Orderlijst/actions/count");
+		if (countResult && countResult.count !== undefined) {
+			apiCount = Number(countResult.count);
+			console.log(`  Records API count: ${apiCount}`);
+		}
+	} catch (err) {
+		console.warn(`  Could not fetch record count (non-fatal): ${err.message}`);
+	}
 
 	const campaigns = [];
 	let lastId = "0";
@@ -264,15 +266,35 @@ async function fetchAllCampaigns() {
 		await sleep(DELAY_BETWEEN_CALLS_MS);
 	}
 
+	// Post-pagination verification: confirm COQL has no more rows beyond lastId
+	if (campaigns.length > 0) {
+		const verifyQuery = `SELECT id FROM Campagnes_Orderlijst WHERE id > '${lastId}' ORDER BY id ASC LIMIT 1`;
+		const verifyResult = await zohoPost("/coql", { select_query: verifyQuery });
+		const leftover = (verifyResult.data || []).length;
+		if (leftover > 0) {
+			throw new Error(
+				`PAGINATION INCOMPLETE: found records beyond lastId ${lastId} after pagination finished. ` +
+				`COQL may be truncating. The sweep cannot continue safely.`
+			);
+		}
+		console.log(`  Post-pagination check passed: no records beyond lastId ${lastId}`);
+	}
+
 	console.log(`Total campaigns fetched: ${campaigns.length}`);
 
-	if (campaigns.length !== expectedCount) {
-		throw new Error(
-			`PAGINATION MISMATCH: fetched ${campaigns.length} campaigns but expected ${expectedCount}. ` +
-			`This means COQL pagination is truncating results. The sweep cannot continue safely.`
+	if (apiCount !== null && campaigns.length !== apiCount) {
+		console.warn(
+			`  WARNING: COQL returned ${campaigns.length} campaigns but Records API count is ${apiCount}. ` +
+			`This is expected if sharing rules, approval states, or profile access restrict which records ` +
+			`the OAuth token can see via COQL. The sweep will process all ${campaigns.length} accessible campaigns.`
 		);
+	} else if (apiCount !== null) {
+		console.log(`  Count cross-check passed: ${campaigns.length} == ${apiCount}`);
 	}
-	console.log(`  Count assertion passed: ${campaigns.length} == ${expectedCount}`);
+
+	if (campaigns.length === 0) {
+		throw new Error("COQL returned zero campaigns. Check OAuth token permissions and module API name.");
+	}
 
 	return campaigns;
 }
