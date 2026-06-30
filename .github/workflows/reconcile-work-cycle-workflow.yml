@@ -1,0 +1,55 @@
+name: Reconcile Work_Cycle_1
+run-name: "Reconcile Work_Cycle_1 Sweep${{ inputs.dryRun == 'true' && ' [DRY RUN]' || '' }}"
+
+on:
+  # Schedule disabled during sandbox validation. Uncomment for production:
+  # schedule:
+  #   - cron: "0 2 * * *"  # Nightly 02:00 UTC (03:00 CET / 04:00 CEST)
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: "Dry run (no writes, preview only)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      allowClear:
+        description: "Allow clearing Work_Cycle_1 when campaign has zero FWCs"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      limitIds:
+        description: "Comma-separated campaign IDs to restrict to (leave empty for all)"
+        required: false
+        type: string
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run reconcile-work-cycle.js
+        env:
+          ZOHO_CLIENT_ID: ${{ secrets.ZOHO_SANDBOX_CLIENT_ID }}
+          ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_SANDBOX_CLIENT_SECRET }}
+          ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_SANDBOX_REFRESH_TOKEN }}
+          ZOHO_CRM_BASE: "https://sandbox.zohoapis.eu/crm/v7"
+          ZOHO_ACCOUNTS_BASE: "https://accounts.zoho.eu"
+          DRY_RUN: ${{ github.event.inputs.dryRun || 'true' }}
+          ALLOW_CLEAR: ${{ github.event.inputs.allowClear || 'false' }}
+          LIMIT_IDS: ${{ github.event.inputs.limitIds || '' }}
+        run: node reconcile-work-cycle.js
