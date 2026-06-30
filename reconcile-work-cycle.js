@@ -307,7 +307,7 @@ async function fetchFwcNamesForCampaign(campaignId) {
 	while (hasMore) {
 		const result = await zohoGet(
 			`/Campagnes_Orderlijst/${campaignId}/${RELATED_LIST_API_NAME}`,
-			{ page: String(page), per_page: "200" }
+			{ fields: "id,Field_Work_Cycle", page: String(page), per_page: "200" }
 		);
 
 		const rows = result.data || [];
