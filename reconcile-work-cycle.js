@@ -223,14 +223,11 @@ async function zohoPut(path, body) {
 // ---- Data fetching ----
 
 async function fetchCampaignCount() {
-	const result = await zohoPost("/coql", {
-		select_query: "SELECT count(id) FROM Campagnes_Orderlijst WHERE id is not null",
-	});
-	const rows = result.data || [];
-	if (rows.length > 0 && rows[0].count !== undefined) {
-		return Number(rows[0].count);
+	const result = await zohoGet("/Campagnes_Orderlijst/actions/count");
+	if (result && result.count !== undefined) {
+		return Number(result.count);
 	}
-	throw new Error(`Could not fetch campaign count. COQL response: ${JSON.stringify(result)}`);
+	throw new Error(`Could not fetch campaign count. Response: ${JSON.stringify(result)}`);
 }
 
 async function fetchAllCampaigns() {
